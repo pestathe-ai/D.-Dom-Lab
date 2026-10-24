@@ -58,13 +58,16 @@ def recognize(path, grammar=None):
             texts.append(json.loads(rec.Result())["text"])
         else:
             p = json.loads(rec.PartialResult())["partial"]
-            if wake_re.search(p):
+            if grammar and wake_re.search(p):
                 texts.append(p)
     texts.append(json.loads(rec.FinalResult())["text"])
     return " | ".join(t for t in texts if t)
 
-wake_phrases = ["ciao dom", "ciao dom!", "ciao, dom"]
-other = ["buongiorno a tutti", "chiama marco", "ciao come stai", "domani piove", "ciao mamma"]
+use_grammar = re.search(r"WAKE_USE_GRAMMAR = (true|false)", kt).group(1) == "true"
+print("grammatica:", use_grammar)
+wake_phrases = ["ciao dom", "ciao dom!", "ciao, dom", "ehi ciao dom"]
+other = ["buongiorno a tutti", "chiama marco", "ciao come stai", "domani piove", "ciao mamma",
+         "ciao tommaso", "ciao domenico", "apri tuttosport", "ciao a tutti", "dove sono le chiavi"]
 ok_wake = 0
 total_wake = 0
 false_pos = 0
@@ -75,19 +78,19 @@ for voice in ["it", "it+m3", "it+f2"]:
             f = wav(ph, voice, speed)
             g = recognize(f, grammar)
             free = recognize(f)
-            hit = bool(wake_re.search(g))
+            hit = bool(wake_re.search(g if use_grammar else free))
             total_wake += 1
             ok_wake += hit
             lines.append(f"WAKE {voice}/{speed} '{ph}': grammatica='{g}' libero='{free}' -> {'OK' if hit else 'MANCATO'}")
         for ph in other:
             f = wav(ph, voice, speed)
-            g = recognize(f, grammar)
+            g = recognize(f, grammar) if use_grammar else recognize(f)
             hit = bool(wake_re.search(g))
             false_pos += hit
             if hit:
                 lines.append(f"FALSO {voice}/{speed} '{ph}': '{g}'")
 print("\n".join(lines))
-summary = f"Ciao Dom riconosciuto {ok_wake}/{total_wake} (voci sintetiche), falsi allarmi {false_pos}/{len(other)*6}, varianti nel vocabolario: {present}"
+summary = f"[{'grammatica' if use_grammar else 'libero'}] Ciao Dom riconosciuto {ok_wake}/{total_wake} (voci sintetiche), falsi allarmi {false_pos}/{len(other)*6}, varianti nel vocabolario: {present}"
 print(summary)
 with open(os.path.join(work, "summary.txt"), "w") as fh:
     fh.write(summary + "\n" + "\n".join(lines[:12]))

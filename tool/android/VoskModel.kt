@@ -149,6 +149,13 @@ object VoskModel {
     /** Varianti di "Dom" che il riconoscitore potrebbe sentire. */
     private val DOM_VARIANTS = listOf("dom", "don", "domo", "dome", "doma", "dong", "tom", "ton", "dum", "domm", "dov", "do")
 
+    /**
+     * Riconoscimento libero (senza grammatica): con la grammatica ristretta
+     * il modello "forza" quasi ogni frase in "ciao tom" e scatta a vuoto.
+     * Verificato in CI con tool/ci/wake_check.py.
+     */
+    const val WAKE_USE_GRAMMAR = false
+
     /** Grammatica: solo "ciao" + varianti di Dom; tutto il resto è [unk]. */
     fun wakeGrammar(): String {
         val known = words

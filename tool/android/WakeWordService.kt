@@ -162,7 +162,7 @@ class WakeWordService : Service(), RecognitionListener {
         if (destroyed || paused || speech != null || !Prefs.wake(this)) return
         val m = VoskModel.model ?: return
         try {
-            val rec = Recognizer(m, 16000.0f, VoskModel.wakeGrammar())
+            val rec = if (VoskModel.WAKE_USE_GRAMMAR) Recognizer(m, 16000.0f, VoskModel.wakeGrammar()) else Recognizer(m, 16000.0f)
             speech = SpeechService(rec, 16000.0f).also { it.startListening(this) }
             status = "listening"
             updateNotification("In ascolto di \"Ciao Dom\"")
@@ -210,7 +210,8 @@ class WakeWordService : Service(), RecognitionListener {
             ""
         }
         if (final && text.isNotBlank() && text != "[unk]") lastHeard = text
-        if (VoskModel.isWakePhrase(text)) {
+        // Senza grammatica i risultati parziali cambiano spesso: decide quello finale.
+        if ((final || VoskModel.WAKE_USE_GRAMMAR) && VoskModel.isWakePhrase(text)) {
             Log.i(TAG, "attivazione: $text")
             lastHeard = text
             pause()
