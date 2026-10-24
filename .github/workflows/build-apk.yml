@@ -57,6 +57,15 @@ jobs:
             exit 1
           fi
 
+      - name: Verifica "Ciao Dom" (Vosk)
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y -qq espeak-ng ffmpeg > /dev/null 2>&1 || true
+          pip install -q vosk
+          python3 tool/ci/wake_check.py 2>&1 | tail -60
+          S=$(sed 's/%/%25/g' build/wake/summary.txt | awk 'BEGIN{ORS="%0A"} {print}')
+          echo "::notice title=wake::$S"
+
       - name: Compila APK
         run: |
           set -o pipefail

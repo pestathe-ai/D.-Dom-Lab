@@ -4,6 +4,7 @@ import 'package:flutter_edge_ai/flutter_edge_ai.dart';
 import 'package:flutter_edge_ai_litertlm/flutter_edge_ai_litertlm.dart';
 import 'package:material_ui/material_ui.dart';
 
+import '../core/actions.dart' show parseAction;
 import '../core/agent.dart' show Brain;
 
 /// Un modello linguistico scaricabile sul telefono.
@@ -127,33 +128,99 @@ class AiAssistant extends ChangeNotifier {
     return _model ??= await FlutterEdgeAi.getActiveModel(
       maxTokens: 4096,
       preferredBackend: PreferredBackend.gpu,
-      // Con i prompt lunghi la mezza precisione può sbagliare le cifre.
-      activationDataType: ActivationDataType.float32,
     );
   }
 
-  /// Risposta libera del modello (per l'assistente "Chiedi"). Null se non
-  /// risponde. Il modello resta caricato: chiamare [release] dopo.
-  Future<String?> generate(AiModelOption m, String prompt, {int maxOutputTokens = 200}) async {
-    working = true;
-    notifyListeners();
-    InferenceModelSession? session;
-    try {
-      final model = await _ensureModel(m);
-      session = await model.createSession(temperature: 0, topK: 1, maxOutputTokens: maxOutputTokens);
-      await session.addQueryChunk(Message.text(text: prompt, isUser: true));
-      final out = await session.getResponse().timeout(const Duration(minutes: 2));
-      error = null;
-      return out;
-    } catch (e) {
-      error = '$e';
-      return null;
-    } finally {
+  /// Una richiesta alla volta: il motore non lavora in parallelo.
+  Future<void> _queue = Future<void>.value();
+
+  Future<T> _locked<T>(Future<T> Function() f) {
+    final next = _queue.then((_) => f());
+    _queue = next.then((_) {}, onError: (_) {});
+    return next;
+  }
+
+  bool get ready => _model != null;
+
+  /// Carica il modello sulla GPU e fa una prova a vuoto, così il primo
+  /// comando vero non aspetta il caricamento.
+  Future<void> warmUp(AiModelOption m) => _locked(() async {
+        if (_model != null && _active?.id == m.id) return;
+        InferenceModelSession? session;
+        try {
+          final model = await _ensureModel(m);
+          session = await model.createSession(temperature: 0, topK: 1, maxOutputTokens: 4);
+          await session.addQueryChunk(Message.text(text: 'Rispondi solo: ok', isUser: true));
+          await session.getResponse().timeout(const Duration(minutes: 2));
+        } catch (e) {
+          error = '$e';
+        } finally {
+          try {
+            await session?.close();
+          } catch (_) {}
+          notifyListeners();
+        }
+      });
+
+  InferenceModelSession? _task;
+  int _taskChars = 0;
+
+  /// Passo di un compito. Riusa la sessione del compito (il modello non
+  /// rilegge tutto ogni volta): manda solo [delta] se c'è ancora spazio,
+  /// altrimenti riparte da [full]. Si ferma appena [done] dice che la
+  /// risposta è completa.
+  Future<String?> step(AiModelOption m, {required String full, String? delta, bool Function(String)? done}) =>
+      _locked(() async {
+        working = true;
+        notifyListeners();
+        try {
+          final model = await _ensureModel(m);
+          String chunk;
+          if (_task != null && delta != null && _taskChars + delta.length < 8500) {
+            chunk = delta;
+          } else {
+            await _closeTask();
+            _task = await model.createSession(temperature: 0, topK: 1, maxOutputTokens: 160);
+            _taskChars = 0;
+            chunk = full;
+          }
+          final session = _task!;
+          await session.addQueryChunk(Message.text(text: chunk, isUser: true));
+          final b = StringBuffer();
+          final sub = session.getResponseAsync();
+          await for (final t in sub.timeout(const Duration(seconds: 90))) {
+            b.write(t);
+            if (done != null && done(b.toString())) {
+              try {
+                await session.stopGeneration();
+              } catch (_) {}
+              break;
+            }
+          }
+          _taskChars += chunk.length + b.length;
+          error = null;
+          return b.toString();
+        } catch (e) {
+          error = '$e';
+          await _closeTask();
+          return null;
+        } finally {
+          working = false;
+          notifyListeners();
+        }
+      });
+
+  /// Fine del compito: chiude la sessione (il modello resta caricato).
+  Future<void> endTask() => _locked(_closeTask);
+
+  Future<void> _closeTask() async {
+    final t = _task;
+    _task = null;
+    _taskChars = 0;
+    if (t != null) {
       try {
-        await session?.close();
+        await t.close();
       } catch (_) {}
-      working = false;
-      notifyListeners();
     }
   }
 
@@ -161,6 +228,7 @@ class AiAssistant extends ChangeNotifier {
   Future<void> release() => _closeModel();
 
   Future<void> _closeModel() async {
+    await _closeTask();
     final m = _model;
     _model = null;
     if (m != null) {
@@ -179,5 +247,9 @@ class GemmaBrain implements Brain {
   final AiModelOption model;
 
   @override
-  Future<String?> complete(String prompt) => ai.generate(model, prompt, maxOutputTokens: 200);
+  Future<String?> complete(String prompt, {String? delta}) =>
+      ai.step(model, full: prompt, delta: delta, done: (s) => parseAction(s) != null);
+
+  @override
+  Future<void> reset() => ai.endTask();
 }

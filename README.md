@@ -8,7 +8,18 @@ Tutto gira **sul telefono, gratis e senza cloud**: il "cervello" è Gemma 4 E2B 
 (lo stesso modello di D. Paper Lab) sulla GPU con LiteRT-LM; l'attivazione "Ciao Dom"
 usa Vosk, offline.
 
-## Cosa sa fare (v0.1)
+## Novità v0.2
+
+- **Più veloce**: i comandi comuni (chiama, apri, SMS, WhatsApp, sveglia, timer, cerca, indietro)
+  partono subito senza Gemma; Gemma resta caricata, ricorda il compito tra un passo e l'altro
+  e si ferma appena ha deciso. Nel registro si vede quanto ci mette ogni passo.
+- **Riconoscimento vocale affidabile**: prova il riconoscitore di sistema, poi quello di Google,
+  poi la voce offline di Dom (Vosk). Se qualcosa non va, l'errore compare nella conversazione.
+- **Bip** quando il microfono si apre.
+- **"Ciao Dom" più tollerante** e, se l'app è già aperta, risponde senza cambiare schermata.
+- Nuovo passo di configurazione **"Voce offline"** (48 MB).
+
+## Cosa sa fare
 
 - **"Ciao Dom"**: attivazione a voce, offline (si accende dalla configurazione).
 - **Bolla microfono** sopra le altre app e pulsante nell'app.
@@ -27,7 +38,8 @@ usa Vosk, offline.
 2. Concedi i permessi (microfono, rubrica, telefono, SMS).
 3. Attiva l'accessibilità: Impostazioni → Accessibilità → "Dom, assistente vocale".
 4. Su Honor/MagicOS togli l'ottimizzazione batteria e metti "Avvio app" in gestione manuale.
-5. Facoltativo: accendi "Ciao Dom" e la bolla.
+5. Scarica la voce offline (48 MB).
+6. Facoltativo: accendi "Ciao Dom" e la bolla.
 
 ## Limiti da sapere
 

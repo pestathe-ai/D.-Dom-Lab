@@ -3,6 +3,7 @@ import 'package:dom_lab/core/agent.dart';
 import 'package:dom_lab/core/apps.dart';
 import 'package:dom_lab/core/contacts.dart';
 import 'package:dom_lab/core/prompt.dart';
+import 'package:dom_lab/core/quick.dart';
 import 'package:dom_lab/core/screen.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -135,11 +136,19 @@ class FakeBrain implements Brain {
   final List<String> replies;
   final List<String> prompts = [];
 
+  final List<String?> deltas = [];
+
   @override
-  Future<String?> complete(String prompt) async {
+  Future<String?> complete(String prompt, {String? delta}) async {
     prompts.add(prompt);
+    deltas.add(delta);
     return replies.isEmpty ? '{"action":"say","text":"Fine."}' : replies.removeAt(0);
   }
+
+  int resets = 0;
+
+  @override
+  Future<void> reset() async => resets++;
 }
 
 const whatsappScreen = ScreenState(package: 'com.whatsapp', nodes: [
@@ -267,6 +276,51 @@ void main() {
     expect(p, contains('sabato 24/10/2026 ore 11:30'));
   });
 
+  group('comandi rapidi', () {
+    test('chiamate, messaggi, app', () {
+      expect(parseQuick('chiama Marco')!.action.str('contact'), 'Marco');
+      expect(parseQuick('Chiama la mamma')!.action.str('contact'), 'mamma');
+      final wa = parseQuick('scrivi a Laura su WhatsApp che arrivo tra dieci minuti')!.action;
+      expect(wa.name, 'whatsapp');
+      expect(wa.str('contact'), 'Laura');
+      expect(wa.str('text'), 'Arrivo tra dieci minuti');
+      final wa2 = parseQuick('manda un messaggio a Laura su whatsapp che arrivo')!.action;
+      expect(wa2.name, 'whatsapp');
+      expect(wa2.str('contact'), 'Laura');
+      final sms = parseQuick('manda un sms a Paolo che sono in ritardo')!.action;
+      expect(sms.name, 'sms');
+      expect(sms.str('text'), 'Sono in ritardo');
+      expect(parseQuick("Apri l'app di Spotify")!.action.str('app'), 'Spotify');
+      final open = parseQuick('apri tuttosport e dimmi cosa sta facendo la Juve e chi ha segnato')!;
+      expect(open.action.str('app'), 'tuttosport');
+      expect(open.followUp, 'dimmi cosa sta facendo la Juve e chi ha segnato');
+      expect(parseQuick('torna indietro')!.action.name, 'back');
+      expect(parseQuick('cerca ristoranti vicino a me')!.action.str('query'), 'ristoranti vicino a me');
+    });
+
+    test('quelli complessi vanno al modello', () {
+      expect(parseQuick('manda una mail a Mario dal mio account di lavoro'), isNull);
+      expect(parseQuick('scrivi a Laura che arrivo'), isNull);
+      expect(parseQuick('cosa sta facendo la Juve?'), isNull);
+    });
+
+    test('ore e durate', () {
+      expect(parseTime('7 e mezza'), (7, 30));
+      expect(parseTime('sette'), (7, 0));
+      expect(parseTime('6:45'), (6, 45));
+      expect(parseTime('otto meno un quarto'), (7, 45));
+      expect(parseTime('sette e venticinque'), (7, 25));
+      expect(parseTime('9 di sera'), (21, 0));
+      expect(parseTime('mezzogiorno'), (12, 0));
+      expect(parseQuick('mettimi la sveglia alle sette e un quarto')!.action.integer('minute'), 15);
+      expect(parseDuration('10 minuti'), 600);
+      expect(parseDuration('dieci minuti'), 600);
+      expect(parseDuration("un'ora"), 3600);
+      expect(parseDuration('un minuto e mezzo'), 90);
+      expect(parseQuick('metti un timer di 5 minuti')!.action.integer('seconds'), 300);
+    });
+  });
+
   group('agente', () {
     test('mail: due Mario → chiede quale, sceglie l\'account, conferma e invia', () async {
       final phone = FakePhone(contacts: contacts, installed: apps);
@@ -327,9 +381,40 @@ void main() {
       ]);
       final out = await Agent(phone: phone, voice: voice, brain: brain).run('cosa sta facendo la Juve?');
       expect(phone.calls.first, 'openApp it.tuttosport.app');
-      // Il secondo prompt contiene lo schermo dell'app.
+      // Il secondo passo manda al modello solo la parte nuova, con lo schermo.
       expect(brain.prompts[1], contains('Juventus 2 - 1 Milan'));
+      expect(brain.deltas[0], isNull);
+      expect(brain.deltas[1], contains('Juventus 2 - 1 Milan'));
+      expect(brain.deltas[1], isNot(contains('Azioni:')));
+      expect(brain.resets, 1);
       expect(out, contains('Vlahović'));
+    });
+
+    test('comando rapido: apre l\'app senza il modello, poi una sola domanda', () async {
+      final phone = FakePhone(installed: apps);
+      phone.screens['it.tuttosport.app'] = const ScreenState(package: 'it.tuttosport.app', nodes: [
+        ScreenNode(id: 1, text: 'Juventus 2 - 1 Milan', clickable: true),
+        ScreenNode(id: 2, text: 'Gol di Vlahović e Yildiz'),
+        ScreenNode(id: 3, text: 'Classifica'),
+      ]);
+      final voice = FakeVoice([]);
+      final brain = FakeBrain(['{"action":"say","text":"Juve avanti 2 a 1."}']);
+      final out = await Agent(phone: phone, voice: voice, brain: brain)
+          .run('apri tuttosport e dimmi cosa sta facendo la Juve');
+      expect(phone.calls.first, 'openApp it.tuttosport.app');
+      expect(brain.prompts, hasLength(1));
+      expect(brain.prompts.first, contains('Juventus 2 - 1 Milan'));
+      expect(out, 'Juve avanti 2 a 1.');
+    });
+
+    test('comando rapido senza modello: sveglia', () async {
+      final phone = FakePhone(installed: apps);
+      final voice = FakeVoice([]);
+      final brain = FakeBrain([]);
+      final out = await Agent(phone: phone, voice: voice, brain: brain).run('sveglia alle 7 e mezza');
+      expect(phone.calls, ['alarm 7:30']);
+      expect(brain.prompts, isEmpty);
+      expect(out, contains('7:30'));
     });
 
     test('non apre le app della banca', () async {

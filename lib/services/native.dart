@@ -87,10 +87,16 @@ class AndroidPhone implements Phone {
 
 /// Voce di sistema: sintesi vocale e riconoscimento in italiano.
 class AndroidVoice implements Voice {
-  AndroidVoice({this.onListening});
+  AndroidVoice({this.onListening, this.onProblem});
 
   /// Avvisa l'interfaccia quando il microfono è aperto.
   final void Function(bool listening)? onListening;
+
+  /// Problemi del riconoscimento vocale, da mostrare all'utente.
+  final void Function(String message)? onProblem;
+
+  /// Motore che ha capito l'ultimo comando (system, google, vosk...).
+  String lastEngine = '';
 
   @override
   Future<void> say(String text) async {
@@ -101,7 +107,18 @@ class AndroidVoice implements Voice {
   Future<String?> listen() async {
     onListening?.call(true);
     try {
-      return await _call<String>('listen', {'timeoutMs': 8000});
+      final r = await _call<Map<dynamic, dynamic>>('listen', {'timeoutMs': 7000});
+      if (r == null) {
+        onProblem?.call('Riconoscimento vocale non disponibile.');
+        return null;
+      }
+      lastEngine = (r['engine'] ?? '').toString();
+      final err = r['error']?.toString();
+      final text = r['text']?.toString();
+      if (err != null && err.isNotEmpty && err != 'annullato' && (text == null || text.isEmpty)) {
+        onProblem?.call('Microfono: $err');
+      }
+      return text;
     } finally {
       onListening?.call(false);
     }
@@ -129,7 +146,13 @@ class NativeStatus {
   bool get sms => _b('sms');
   bool get battery => _b('battery');
   bool get wake => _b('wake');
-  bool get wakeModel => _b('wakeModel');
+  bool get recognizer => _b('recognizer');
+  String get engine => (_m['engine'] ?? '').toString();
+  String get lastHeard => (_m['lastHeard'] ?? '').toString();
+
+  /// Voce offline (Vosk): missing, downloaded, downloading N, loading, ready, error ...
+  String get vosk => (_m['vosk'] ?? 'missing').toString();
+  bool get voskReady => vosk == 'ready' || vosk == 'downloaded' || vosk == 'loading';
   bool get bubble => _b('bubble');
   String get wakeStatus => (_m['wakeStatus'] ?? 'off').toString();
   String get package => (_m['package'] ?? '').toString();
@@ -147,6 +170,7 @@ class NativeControls {
   static Future<bool> openBatterySettings() => _ok('openBatterySettings');
   static Future<bool> openAppSettings() => _ok('openAppSettings');
   static Future<bool> setWake(bool on) => _ok('setWake', {'on': on});
+  static Future<bool> downloadVosk() => _ok('downloadVosk');
   static Future<bool> setBubble(bool on) => _ok('setBubble', {'on': on});
   static Future<bool> beginSession() => _ok('beginSession');
   static Future<bool> endSession() => _ok('endSession');

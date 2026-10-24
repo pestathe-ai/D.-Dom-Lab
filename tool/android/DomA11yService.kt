@@ -271,6 +271,8 @@ class DomA11yService : AccessibilityService() {
 
     /** Sveglia l'assistente: porta D. Dom Lab in primo piano e inizia ad ascoltare. */
     fun wake(source: String) {
+        // Se il microfono è già disponibile in background, niente cambio schermata.
+        if (MainActivity.deliverWake(source)) return
         launch(Intent(this, MainActivity::class.java).putExtra("wake", source)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
     }

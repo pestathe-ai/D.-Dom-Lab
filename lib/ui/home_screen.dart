@@ -335,6 +335,15 @@ class _SetupPanel extends StatelessWidget {
               : 'Consenti a Dom di restare attivo, altrimenti MagicOS lo chiude. Su Honor anche: Batteria → Avvio app → D. Dom Lab → Gestisci manualmente (tutto attivo)',
           action: st.battery ? null : FilledButton.tonal(onPressed: NativeControls.openBatterySettings, child: const Text('Apri')),
         ),
+        _Step(
+          done: st.vosk == 'ready' || st.vosk == 'downloaded',
+          title: '5. Voce offline',
+          subtitle: _voskText(st),
+          action: st.vosk == 'missing' || st.vosk.startsWith('error')
+              ? FilledButton.tonal(onPressed: NativeControls.downloadVosk, child: const Text('Scarica'))
+              : null,
+          progress: st.vosk.startsWith('downloading') ? (int.tryParse(st.vosk.split(' ').last) ?? 0) / 100 : null,
+        ),
         const Divider(height: 20),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
@@ -354,6 +363,25 @@ class _SetupPanel extends StatelessWidget {
     );
   }
 
+  static String _voskText(NativeStatus st) {
+    final v = st.vosk;
+    final engine = switch (st.engine) {
+      'system-offline' => 'riconoscitore di sistema, offline',
+      'system' => 'riconoscitore di sistema',
+      'google' => 'riconoscitore Google',
+      'vosk' => 'voce offline di Dom',
+      _ => '',
+    };
+    final using = engine.isEmpty ? '' : ' Ultimo comando capito con: $engine.';
+    if (v.startsWith('downloading')) return 'Scarico la voce offline… ${v.split(' ').last}%';
+    if (v == 'loading') return 'Preparo la voce offline…';
+    if (v.startsWith('error')) return 'Problema: ${v.substring(5).trim()}. Riprova.';
+    if (v == 'missing') {
+      return 'Serve per "Ciao Dom" e se il riconoscimento di sistema non funziona. 48 MB, una volta sola.${st.recognizer ? '' : ' Su questo telefono il riconoscimento di sistema non c\'è: è indispensabile.'}';
+    }
+    return 'Pronta, funziona senza internet.$using';
+  }
+
   static String _wakeText(NativeStatus st) {
     if (!st.wake) {
       return 'Dom ascolta solo la frase "Ciao Dom", sul telefono e senza internet. La prima volta scarica 48 MB.';
@@ -361,7 +389,9 @@ class _SetupPanel extends StatelessWidget {
     final w = st.wakeStatus;
     if (w.startsWith('downloading')) return 'Scarico il riconoscitore della frase… ${w.split(' ').last}%';
     if (w == 'loading') return 'Preparo il riconoscitore…';
-    if (w == 'listening') return 'In ascolto: di\' "Ciao Dom".';
+    if (w == 'listening') {
+      return st.lastHeard.isEmpty ? 'In ascolto: di\' "Ciao Dom".' : 'In ascolto: di\' "Ciao Dom". Ultima cosa sentita: "${st.lastHeard}".';
+    }
     if (w == 'paused' || w == 'session') return 'In pausa mentre Dom lavora.';
     if (w.startsWith('error')) return 'Problema: ${w.substring(5).trim()}. Spegni e riaccendi.';
     return 'Avvio…';

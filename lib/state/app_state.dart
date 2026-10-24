@@ -16,9 +16,10 @@ enum Phase { idle, listening, thinking, speaking }
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
   final AiAssistant ai = AiAssistant();
   final AndroidPhone phone = AndroidPhone();
-  late final AndroidVoice voice = AndroidVoice(onListening: (l) {
-    _setPhase(l ? Phase.listening : (busy ? Phase.thinking : Phase.idle));
-  });
+  late final AndroidVoice voice = AndroidVoice(
+    onListening: (l) => _setPhase(l ? Phase.listening : (busy ? Phase.thinking : Phase.idle)),
+    onProblem: (m) => _add(LogEntry('error', m)),
+  );
 
   NativeStatus status = NativeStatus.empty;
   final List<LogEntry> log = [];
@@ -34,7 +35,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   AiModelOption get model => aiModelById(modelId) ?? aiModels.first;
 
-  bool get setupDone => modelInstalled && status.permissions && status.a11y;
+  bool get setupDone => modelInstalled && status.permissions && status.a11y && status.voskReady;
 
   Future<void> init() async {
     WidgetsBinding.instance.addObserver(this);
@@ -48,6 +49,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _poll = Timer.periodic(const Duration(seconds: 3), (_) => refreshStatus());
     final w = await NativeControls.takeWake();
     if (w != null) unawaited(activate(fromWake: true));
+    // Carica subito Gemma, così il primo comando non aspetta.
+    if (modelInstalled) unawaited(ai.warmUp(model));
   }
 
   @override
@@ -97,6 +100,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       modelInstalled = true;
       _agent = null;
       await _saveSettings();
+      unawaited(ai.warmUp(m));
     } catch (_) {
       // L'errore è in ai.error e viene mostrato.
     }
@@ -144,12 +148,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     busy = true;
     notifyListeners();
     await NativeControls.beginSession();
+    // Mentre l'utente parla, Gemma finisce di caricarsi.
+    unawaited(ai.warmUp(model));
     try {
-      HapticFeedback.mediumImpact();
+      unawaited(HapticFeedback.mediumImpact());
       if (fromWake) await voice.say('Dimmi.');
       final text = await voice.listen();
       if (text == null || text.trim().isEmpty) {
-        _add(const LogEntry('error', 'Non ho sentito niente.'));
+        if (log.isEmpty || log.last.kind != 'error') _add(const LogEntry('error', 'Non ho sentito niente.'));
         return;
       }
       await _run(text);

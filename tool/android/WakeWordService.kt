@@ -14,17 +14,9 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import org.json.JSONObject
-import org.vosk.LibVosk
-import org.vosk.LogLevel
-import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.RecognitionListener
 import org.vosk.android.SpeechService
-import java.io.File
-import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.zip.ZipInputStream
 
 /** Impostazioni native condivise tra servizi e app. */
 object Prefs {
@@ -36,9 +28,11 @@ object Prefs {
 }
 
 /**
- * Ascolta in continuo, sul telefono e senza internet, solo la frase
- * "Ciao Dom" (Vosk, modello italiano piccolo con grammatica ristretta).
- * Quando la sente, mette in pausa il microfono e sveglia l'assistente.
+ * Servizio in primo piano col microfono.
+ *  - Con "Ciao Dom" acceso ascolta in continuo solo quella frase (Vosk,
+ *    offline) e sveglia l'assistente.
+ *  - Mentre Dom lavora tiene il microfono disponibile anche quando è aperta
+ *    un'altra app (Android lo concede solo ai servizi di questo tipo).
  */
 class WakeWordService : Service(), RecognitionListener {
 
@@ -46,29 +40,18 @@ class WakeWordService : Service(), RecognitionListener {
         private const val TAG = "DomWake"
         private const val CHANNEL = "dom_wake"
         private const val NOTIF_ID = 7
-        const val MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip"
-        const val MODEL_DIR = "vosk-model-small-it-0.22"
 
         @Volatile
         var instance: WakeWordService? = null
             private set
 
-        /** Stato leggibile dall'app: off, downloading N%, loading, listening, paused, error. */
+        /** off, session, loading, listening, paused, error ... */
         @Volatile
         var status: String = "off"
 
-        private var model: Model? = null
-
-        fun modelDir(c: Context) = File(c.filesDir, MODEL_DIR)
-
-        fun modelReady(c: Context) = File(modelDir(c), "am/final.mdl").exists() || File(modelDir(c), "conf/model.conf").exists()
-
-        /** Parole che il riconoscitore può sentire: tutto il resto è [unk]. */
-        private const val GRAMMAR = "[\"ciao dom\", \"ciao don\", \"ciao tom\", \"ciao domo\", \"ciao\", \"dom\", \"don\", \"[unk]\"]"
-
-        /** Vero se il testo riconosciuto è la frase di attivazione. */
-        fun isWakePhrase(text: String): Boolean =
-            Regex("\\bciao\\s+(dom|don|tom|domo)\\b").containsMatchIn(text.lowercase())
+        /** Ultima frase sentita (per capire se "Ciao Dom" viene frainteso). */
+        @Volatile
+        var lastHeard: String = ""
 
         fun start(c: Context) {
             val i = Intent(c, WakeWordService::class.java)
@@ -84,9 +67,10 @@ class WakeWordService : Service(), RecognitionListener {
     private val main = Handler(Looper.getMainLooper())
     private var speech: SpeechService? = null
     private var paused = false
+    private var destroyed = false
+
     @Volatile
     private var preparing = false
-    private var destroyed = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -94,32 +78,46 @@ class WakeWordService : Service(), RecognitionListener {
         super.onCreate()
         instance = this
         try {
-            startInForeground("In ascolto di \"Ciao Dom\"")
+            startInForeground(if (Prefs.wake(this)) "In ascolto di \"Ciao Dom\"" else "Dom è al lavoro")
         } catch (e: Exception) {
             // Android non permette di usare il microfono da qui (es. avvio
             // in background): si riattiva aprendo l'app.
             Log.e(TAG, "foreground", e)
-            status = "error avvio"
+            status = "error avvio in background non consentito"
+            instance = null
             stopSelf()
             return
         }
-        LibVosk.setLogLevel(LogLevel.WARNINGS)
         refresh()
     }
 
-    /**
-     * Senza "Ciao Dom" attivo il servizio resta acceso solo mentre Dom lavora
-     * (serve ad Android per lasciare il microfono all'assistente anche
-     * quando è aperta un'altra app).
-     */
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    override fun onDestroy() {
+        destroyed = true
+        if (instance === this) instance = null
+        stopMic()
+        status = "off"
+        super.onDestroy()
+    }
+
+    /** Applica l'impostazione "Ciao Dom" (accesa o spenta). */
     fun refresh() {
         if (Prefs.wake(this)) {
             paused = false
             if (speech == null && !preparing) {
                 preparing = true
+                status = "loading"
                 Thread {
-                    prepareAndListen()
-                    preparing = false
+                    try {
+                        VoskModel.ensure(this)
+                        main.post { startMic() }
+                    } catch (e: Exception) {
+                        status = "error ${e.message}"
+                        updateNotification("Errore: ${e.message}")
+                    } finally {
+                        preparing = false
+                    }
                 }.start()
             }
         } else {
@@ -129,20 +127,10 @@ class WakeWordService : Service(), RecognitionListener {
         }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
-
-    override fun onDestroy() {
-        destroyed = true
-        instance = null
-        stopMic()
-        status = "off"
-        super.onDestroy()
-    }
-
     private fun startInForeground(text: String) {
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= 26) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Ascolto \"Ciao Dom\"", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Microfono di Dom", NotificationManager.IMPORTANCE_LOW))
         }
         val open = PendingIntent.getActivity(
             this, 0,
@@ -170,85 +158,17 @@ class WakeWordService : Service(), RecognitionListener {
         }
     }
 
-    private fun prepareAndListen() {
-        try {
-            if (!modelReady(this)) {
-                status = "downloading 0"
-                downloadModel()
-            }
-            if (destroyed) return
-            status = "loading"
-            if (model == null) model = Model(modelDir(this).absolutePath)
-            main.post { startMic() }
-        } catch (e: Exception) {
-            Log.e(TAG, "preparazione", e)
-            status = "error ${e.message}"
-            updateNotification("Errore: ${e.message}")
-        }
-    }
-
-    /** Scarica e scompatta il modello italiano (circa 50 MB, una volta sola). */
-    private fun downloadModel() {
-        val tmp = File(cacheDir, "vosk-it.zip")
-        var conn = URL(MODEL_URL).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = true
-        conn.connectTimeout = 20000
-        conn.readTimeout = 30000
-        if (conn.responseCode in 300..399) {
-            val loc = conn.getHeaderField("Location")
-            conn.disconnect()
-            conn = URL(loc).openConnection() as HttpURLConnection
-        }
-        val total = conn.contentLengthLong.coerceAtLeast(1)
-        conn.inputStream.use { input ->
-            FileOutputStream(tmp).use { out ->
-                val buf = ByteArray(64 * 1024)
-                var done = 0L
-                var lastPct = -1
-                while (true) {
-                    if (destroyed) return
-                    val r = input.read(buf)
-                    if (r < 0) break
-                    out.write(buf, 0, r)
-                    done += r
-                    val pct = (done * 100 / total).toInt()
-                    if (pct != lastPct) {
-                        lastPct = pct
-                        status = "downloading $pct"
-                    }
-                }
-            }
-        }
-        conn.disconnect()
-        val dest = filesDir
-        ZipInputStream(tmp.inputStream().buffered()).use { zip ->
-            while (true) {
-                val e = zip.nextEntry ?: break
-                val f = File(dest, e.name)
-                if (!f.canonicalPath.startsWith(dest.canonicalPath)) continue
-                if (e.isDirectory) {
-                    f.mkdirs()
-                } else {
-                    f.parentFile?.mkdirs()
-                    FileOutputStream(f).use { zip.copyTo(it) }
-                }
-            }
-        }
-        tmp.delete()
-        if (!modelReady(this)) throw IllegalStateException("modello vocale incompleto")
-    }
-
     private fun startMic() {
-        if (destroyed || paused || speech != null) return
-        val m = model ?: return
+        if (destroyed || paused || speech != null || !Prefs.wake(this)) return
+        val m = VoskModel.model ?: return
         try {
-            val rec = Recognizer(m, 16000.0f, GRAMMAR)
+            val rec = Recognizer(m, 16000.0f, VoskModel.wakeGrammar())
             speech = SpeechService(rec, 16000.0f).also { it.startListening(this) }
             status = "listening"
             updateNotification("In ascolto di \"Ciao Dom\"")
         } catch (e: Exception) {
             Log.e(TAG, "microfono", e)
-            status = "error ${e.message}"
+            status = "error microfono occupato"
             // Il microfono può essere occupato (chiamata, altra app): riprova.
             main.postDelayed({ startMic() }, 5000)
         }
@@ -270,7 +190,7 @@ class WakeWordService : Service(), RecognitionListener {
         main.post {
             paused = true
             stopMic()
-            status = "paused"
+            status = if (Prefs.wake(this)) "paused" else "session"
         }
     }
 
@@ -281,7 +201,7 @@ class WakeWordService : Service(), RecognitionListener {
         }
     }
 
-    private fun check(json: String?) {
+    private fun check(json: String?, final: Boolean) {
         if (json == null || paused) return
         val text = try {
             val o = JSONObject(json)
@@ -289,17 +209,21 @@ class WakeWordService : Service(), RecognitionListener {
         } catch (_: Exception) {
             ""
         }
-        if (isWakePhrase(text)) {
+        if (final && text.isNotBlank() && text != "[unk]") lastHeard = text
+        if (VoskModel.isWakePhrase(text)) {
             Log.i(TAG, "attivazione: $text")
+            lastHeard = text
             pause()
             main.post { wake() }
         }
     }
 
     private fun wake() {
-        val a11y = DomA11yService.instance
+        // App già viva: le passa il comando senza cambiare schermata.
+        if (MainActivity.deliverWake("voice")) return
         val intent = Intent(this, MainActivity::class.java).putExtra("wake", "voice")
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        val a11y = DomA11yService.instance
         if (a11y != null && a11y.launch(intent)) return
         try {
             startActivity(intent)
@@ -308,9 +232,9 @@ class WakeWordService : Service(), RecognitionListener {
         }
     }
 
-    override fun onPartialResult(hypothesis: String?) = check(hypothesis)
-    override fun onResult(hypothesis: String?) = check(hypothesis)
-    override fun onFinalResult(hypothesis: String?) = check(hypothesis)
+    override fun onPartialResult(hypothesis: String?) = check(hypothesis, false)
+    override fun onResult(hypothesis: String?) = check(hypothesis, true)
+    override fun onFinalResult(hypothesis: String?) = check(hypothesis, true)
     override fun onError(exception: Exception?) {
         Log.e(TAG, "errore", exception)
         stopMic()

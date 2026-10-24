@@ -2,6 +2,7 @@ import 'actions.dart';
 import 'apps.dart';
 import 'contacts.dart';
 import 'prompt.dart';
+import 'quick.dart';
 import 'screen.dart';
 
 /// Quello che l'agente può fare sul telefono (implementato in Kotlin; nei
@@ -36,7 +37,13 @@ abstract class Voice {
 
 /// Il modello linguistico.
 abstract class Brain {
-  Future<String?> complete(String prompt);
+  /// [prompt] è il prompt completo; [delta] solo la parte nuova rispetto al
+  /// passo precedente dello stesso compito (il modello può usare l'una o
+  /// l'altra).
+  Future<String?> complete(String prompt, {String? delta});
+
+  /// Fine del compito.
+  Future<void> reset();
 }
 
 /// Una riga del registro mostrato a schermo.
@@ -87,23 +94,48 @@ class Agent {
   Future<String> run(String request) async {
     _stop = false;
     _log('user', request);
+    try {
+      return await _run(request);
+    } finally {
+      await brain.reset();
+    }
+  }
+
+  Future<String> _run(String request) async {
     final history = <StepRecord>[];
+
+    // Comandi comuni: subito, senza il modello.
+    final quick = parseQuick(request);
+    if (quick != null) {
+      _log('step', '⚡ ${quick.action}');
+      final outcome = await _execute(quick.action);
+      if (outcome.finalMessage != null) return _finish(outcome.finalMessage!);
+      if (quick.followUp == null && outcome.ok) return _finish(outcome.result);
+      // Serve il modello (domanda sull'app aperta, o app non trovata).
+      history.add(StepRecord(quick.action.toString(), outcome.result));
+    }
+
     var invalid = 0;
     var failures = 0;
     for (var step = 0; step < maxSteps; step++) {
       if (_stop) return _finish('Ok, mi fermo.');
       final screen = await _screenText();
       final prompt = buildStepPrompt(request: request, history: history, screen: screen, now: _clock());
-      final raw = await brain.complete(prompt);
+      final delta = step == 0 ? null : buildDeltaPrompt(last: history.isEmpty ? null : history.last, screen: screen);
+      final watch = Stopwatch()..start();
+      final raw = await brain.complete(prompt, delta: delta);
+      watch.stop();
       if (raw == null) return _finish('Il modello non risponde. Riprova tra poco.');
       final action = parseAction(raw);
+      final secs = (watch.elapsedMilliseconds / 1000).toStringAsFixed(1);
       if (action == null) {
         invalid++;
+        _log('step', '? risposta non valida ($secs s)');
         history.add(StepRecord('(risposta non valida)', 'Rispondi solo con UN oggetto JSON con il campo "action".'));
         if (invalid >= 3) return _finish('Scusa, non ho capito come fare. Puoi ripetere in un altro modo?');
         continue;
       }
-      _log('step', action.toString());
+      _log('step', '$action ($secs s)');
       if (action.name == 'say') {
         final text = action.str('text').isEmpty ? 'Fatto.' : action.str('text');
         return _finish(text);
@@ -202,7 +234,7 @@ class Agent {
         return _email(a);
       case 'alarm':
         final h = a.integer('hour');
-        final m = a.integer('minute') ?? 0;
+        final m = a.integer('minute') ?? a.integer('minutes') ?? 0;
         if (h == null || h < 0 || h > 23 || m < 0 || m > 59) return const _Outcome.fail('Ora non valida: chiedi l\'ora.');
         final ok = await phone.setAlarm(h, m, a.str('label'));
         return ok ? _Outcome('Sveglia impostata alle $h:${m.toString().padLeft(2, '0')}.') : const _Outcome.fail('Sveglia non impostata.');
@@ -211,7 +243,7 @@ class Agent {
         final sec = (a.integer('seconds') ?? 0) + min * 60;
         if (sec <= 0) return const _Outcome.fail('Durata non valida: chiedi quanto tempo.');
         final ok = await phone.setTimer(sec, a.str('label'));
-        return ok ? _Outcome('Timer di $sec secondi avviato.') : const _Outcome.fail('Timer non avviato.');
+        return ok ? _Outcome('Timer di ${_humanDuration(sec)} avviato.') : const _Outcome.fail('Timer non avviato.');
       case 'web_search':
         final q = a.str('query');
         if (q.isEmpty) return const _Outcome.fail('Manca cosa cercare.');
@@ -244,8 +276,15 @@ class Agent {
       return _Outcome.end('${app.label} è un\'app di banca o pagamenti: per sicurezza non la apro.');
     }
     final ok = await phone.openApp(app.package);
-    await phone.pause(const Duration(milliseconds: 2500));
-    return ok ? _Outcome('Aperta ${app.label}.') : _Outcome.fail('Non riesco ad aprire ${app.label}.');
+    if (!ok) return _Outcome.fail('Non riesco ad aprire ${app.label}.');
+    // Aspetta che l'app sia davvero in primo piano (al massimo 4 secondi).
+    for (var i = 0; i < 13; i++) {
+      await phone.pause(const Duration(milliseconds: 300));
+      final s = await phone.screen();
+      if (s.package == app.package && s.nodes.length > 2) break;
+    }
+    await phone.pause(const Duration(milliseconds: 500));
+    return _Outcome('Ho aperto ${app.label}.');
   }
 
   Future<ScreenState?> _actionableScreen() async {
@@ -267,7 +306,7 @@ class Agent {
       if (!ok) return const _Outcome.end('Ok, non lo tocco.');
     }
     final ok = await phone.tap(node.id);
-    await phone.pause(const Duration(milliseconds: 1200));
+    await phone.pause(const Duration(milliseconds: 800));
     return ok ? _Outcome('Toccato "${node.label}".') : const _Outcome.fail('Tocco non riuscito.');
   }
 
@@ -470,6 +509,13 @@ bool isRiskyLabel(String label) {
   final l = ' ${normalize(label.replaceAll('_', ' '))} ';
   const words = [' invia ', ' send ', ' chiama ', ' call ', ' paga ', ' pay ', ' acquista ', ' compra ', ' buy ', ' ordina ', ' elimina ', ' delete ', ' cancella ', ' pubblica ', ' post ', ' condividi ', ' share '];
   return words.any(l.contains);
+}
+
+String _humanDuration(int sec) {
+  if (sec % 3600 == 0) return sec == 3600 ? 'un\'ora' : '${sec ~/ 3600} ore';
+  if (sec % 60 == 0) return sec == 60 ? 'un minuto' : '${sec ~/ 60} minuti';
+  if (sec < 60) return '$sec secondi';
+  return '${sec ~/ 60} minuti e ${sec % 60} secondi';
 }
 
 String _joinOr(List<String> items) {

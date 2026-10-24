@@ -2,9 +2,12 @@ package dev.domlab.dom_lab
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,6 +27,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 
@@ -33,6 +37,24 @@ import java.util.UUID
  * accessibilità. Canale "domlab/native".
  */
 class MainActivity : FlutterActivity() {
+    companion object {
+        @Volatile
+        private var current: MainActivity? = null
+
+        /**
+         * Passa la sveglia all'app già aperta (anche in background) senza
+         * cambiare schermata. Solo se il servizio microfono è attivo, perché
+         * Android lascia il microfono alle app in background solo così.
+         */
+        fun deliverWake(source: String): Boolean {
+            val a = current ?: return false
+            val ch = a.channel ?: return false
+            if (WakeWordService.instance == null) return false
+            a.main.post { ch.invokeMethod("wake", source) }
+            return true
+        }
+    }
+
     private var channel: MethodChannel? = null
     private val main = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -46,7 +68,9 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingWake = wakeExtra(intent)
+        current = this
         initTts()
+        if (VoskModel.downloaded(this)) VoskModel.prepareAsync(this)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -77,6 +101,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        if (current === this) current = null
+        stopVosk()
         recognizer?.destroy()
         recognizer = null
         tts?.shutdown()
@@ -101,7 +127,10 @@ class MainActivity : FlutterActivity() {
                     "battery" to batteryFree(),
                     "wake" to Prefs.wake(this),
                     "wakeStatus" to WakeWordService.status,
-                    "wakeModel" to WakeWordService.modelReady(this),
+                    "lastHeard" to WakeWordService.lastHeard,
+                    "vosk" to VoskModel.refreshStatus(this),
+                    "recognizer" to SpeechRecognizer.isRecognitionAvailable(this),
+                    "engine" to (goodEngine ?: ""),
                     "bubble" to Prefs.bubble(this),
                     "package" to packageName,
                     "tts" to ttsReady,
@@ -153,6 +182,9 @@ class MainActivity : FlutterActivity() {
                 }
                 result.success(true)
             }
+            "downloadVosk" -> {
+                VoskModel.prepareAsync(this); result.success(true)
+            }
             "setBubble" -> {
                 val on = call.argument<Boolean>("on") == true
                 Prefs.setBubble(this, on)
@@ -186,7 +218,7 @@ class MainActivity : FlutterActivity() {
             }
             "listen" -> listen(call.argument<Int>("timeoutMs") ?: 8000, result)
             "stopListening" -> {
-                recognizer?.cancel(); finishListen(null); result.success(true)
+                recognizer?.cancel(); stopVosk(); finishListen(null, "", "annullato"); result.success(true)
             }
 
             // --- schermo (servizio di accessibilità) ---
@@ -311,63 +343,233 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * Ascolta un comando. Prova in ordine: il riconoscitore di sistema
+     * (offline se può), lo stesso con internet, quello di Google indicato
+     * esplicitamente (su Honor spesso non è il predefinito), infine Vosk
+     * sul telefono. Ricorda quello che ha funzionato per la volta dopo.
+     * Risponde con {text, engine, error}.
+     */
     private fun listen(timeoutMs: Int, result: MethodChannel.Result) {
         if (!has(Manifest.permission.RECORD_AUDIO)) {
-            result.error("mic", "Permesso microfono mancante", null); return
+            result.success(mapOf("text" to null, "engine" to "", "error" to "Permesso microfono mancante")); return
         }
-        listenResult?.success(null)
+        listenResult?.success(mapOf("text" to null, "engine" to "", "error" to "annullato"))
         listenResult = result
+        listenErrors.clear()
+        tryEngine(engineOrder(), timeoutMs, result)
+    }
+
+    private val listenErrors = mutableListOf<String>()
+
+    /** Motore che ha funzionato l'ultima volta (va per primo). */
+    private var goodEngine: String? = null
+
+    private fun engineOrder(): List<String> {
+        val order = mutableListOf<String>()
+        if (SpeechRecognizer.isRecognitionAvailable(this)) {
+            order += "system-offline"
+            order += "system"
+        }
+        if (googleRecognizer() != null) order += "google"
+        order += "vosk"
+        goodEngine?.let { if (order.remove(it)) order.add(0, it) }
+        return order
+    }
+
+    private fun googleRecognizer(): ComponentName? {
+        val c = ComponentName("com.google.android.googlequicksearchbox", "com.google.android.voicesearch.serviceapi.GoogleRecognitionService")
+        return try {
+            packageManager.getServiceInfo(c, 0); c
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun tryEngine(order: List<String>, timeoutMs: Int, result: MethodChannel.Result) {
+        if (listenResult !== result) return
+        if (order.isEmpty()) {
+            finishListen(null, "", listenErrors.joinToString("; ").ifEmpty { "nessun riconoscitore vocale" })
+            return
+        }
+        val engine = order.first()
+        val rest = order.drop(1)
+        if (engine == "vosk") {
+            listenVosk(timeoutMs, result, rest)
+            return
+        }
         recognizer?.destroy()
-        val r = if (Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(this) && preferOnDevice) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
-        } else {
-            SpeechRecognizer.createSpeechRecognizer(this)
+        val r = try {
+            if (engine == "google") SpeechRecognizer.createSpeechRecognizer(this, googleRecognizer())
+            else SpeechRecognizer.createSpeechRecognizer(this)
+        } catch (e: Exception) {
+            listenErrors += "$engine: ${e.message}"
+            tryEngine(rest, timeoutMs, result); return
         }
         recognizer = r
+        var heard = false
         r.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {}
-            override fun onBeginningOfSpeech() {}
+            override fun onReadyForSpeech(params: Bundle?) = beep()
+            override fun onBeginningOfSpeech() { heard = true }
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
             override fun onError(error: Int) {
-                // Il riconoscitore sul telefono non c'è o non ha l'italiano:
-                // passa a quello standard e riprova una volta.
-                if (preferOnDevice && (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
-                        error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE || error == SpeechRecognizer.ERROR_CLIENT ||
-                        error == SpeechRecognizer.ERROR_SERVER)) {
-                    preferOnDevice = false
-                    val res = listenResult
-                    listenResult = null
-                    if (res != null) main.post { listen(timeoutMs, res) }
+                if (listenResult !== result) return
+                // Silenzio: l'utente non ha parlato, niente da riprovare.
+                if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT || (error == SpeechRecognizer.ERROR_NO_MATCH && heard)) {
+                    goodEngine = engine
+                    finishListen(null, engine, null)
                     return
                 }
-                finishListen(null)
+                listenErrors += "$engine: ${errorName(error)}"
+                main.post { tryEngine(rest, timeoutMs, result) }
             }
             override fun onResults(results: Bundle?) {
-                val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                finishListen(list?.firstOrNull())
+                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+                if (text.isNullOrBlank() && !heard) {
+                    listenErrors += "$engine: risultato vuoto"
+                    main.post { tryEngine(rest, timeoutMs, result) }
+                    return
+                }
+                goodEngine = engine
+                finishListen(text, engine, null)
             }
         })
         val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
-            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "it-IT")
+            .putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, engine == "system-offline")
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
-        r.startListening(i)
-        main.postDelayed({ if (listenResult === result) { r.cancel(); finishListen(null) } }, timeoutMs.toLong() + 15000)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+        try {
+            r.startListening(i)
+        } catch (e: Exception) {
+            listenErrors += "$engine: ${e.message}"
+            tryEngine(rest, timeoutMs, result); return
+        }
+        // Se il riconoscitore resta muto (succede su alcuni telefoni), passa al prossimo.
+        main.postDelayed({
+            if (listenResult === result && recognizer === r && !heard) {
+                r.cancel()
+                listenErrors += "$engine: nessuna risposta"
+                tryEngine(rest, timeoutMs, result)
+            }
+        }, timeoutMs.toLong() + 2000)
+        main.postDelayed({
+            if (listenResult === result && recognizer === r) {
+                r.cancel(); finishListen(null, engine, "tempo scaduto")
+            }
+        }, timeoutMs.toLong() + 20000)
     }
 
-    private var preferOnDevice = false
+    private var vosk: org.vosk.android.SpeechService? = null
 
-    private fun finishListen(text: String?) {
+    /** Riconoscimento con Vosk, tutto sul telefono. */
+    private fun listenVosk(timeoutMs: Int, result: MethodChannel.Result, rest: List<String>) {
+        if (!VoskModel.downloaded(this) && VoskModel.model == null) {
+            listenErrors += "vosk: voce offline non scaricata"
+            tryEngine(rest, timeoutMs, result); return
+        }
+        Thread {
+            val model = try {
+                VoskModel.ensure(this)
+            } catch (e: Exception) {
+                null
+            }
+            main.post {
+                if (listenResult !== result) return@post
+                if (model == null) {
+                    listenErrors += "vosk: ${VoskModel.status}"
+                    tryEngine(rest, timeoutMs, result); return@post
+                }
+                var partial = ""
+                var heard = false
+                try {
+                    stopVosk()
+                    val svc = org.vosk.android.SpeechService(org.vosk.Recognizer(model, 16000.0f), 16000.0f)
+                    vosk = svc
+                    beep()
+                    svc.startListening(object : org.vosk.android.RecognitionListener {
+                        override fun onPartialResult(hypothesis: String?) {
+                            val t = voskText(hypothesis, "partial")
+                            if (t.isNotBlank()) { partial = t; heard = true }
+                        }
+                        override fun onResult(hypothesis: String?) {
+                            val t = voskText(hypothesis, "text")
+                            if (t.isNotBlank()) {
+                                stopVosk(); goodEngine = "vosk"; finishListen(t, "vosk", null)
+                            }
+                        }
+                        override fun onFinalResult(hypothesis: String?) {
+                            val t = voskText(hypothesis, "text").ifBlank { partial }
+                            stopVosk(); finishListen(t.ifBlank { null }, "vosk", null)
+                        }
+                        override fun onError(exception: Exception?) {
+                            stopVosk(); finishListen(null, "vosk", "vosk: ${exception?.message}")
+                        }
+                        override fun onTimeout() {
+                            stopVosk(); finishListen(partial.ifBlank { null }, "vosk", if (heard) null else null)
+                        }
+                    }, timeoutMs)
+                } catch (e: Exception) {
+                    listenErrors += "vosk: ${e.message}"
+                    stopVosk()
+                    finishListen(null, "vosk", listenErrors.joinToString("; "))
+                }
+            }
+        }.start()
+    }
+
+    private fun voskText(json: String?, key: String): String = try {
+        JSONObject(json ?: "").optString(key, "").trim()
+    } catch (_: Exception) {
+        ""
+    }
+
+    private fun stopVosk() {
+        vosk?.let {
+            try {
+                it.stop(); it.shutdown()
+            } catch (_: Exception) {
+            }
+        }
+        vosk = null
+    }
+
+    private fun beep() {
+        try {
+            val tg = ToneGenerator(AudioManager.STREAM_MUSIC, 70)
+            tg.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+            main.postDelayed({ tg.release() }, 400)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun errorName(e: Int): String = when (e) {
+        SpeechRecognizer.ERROR_AUDIO -> "audio"
+        SpeechRecognizer.ERROR_CLIENT -> "client"
+        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "permessi"
+        SpeechRecognizer.ERROR_NETWORK -> "rete"
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "rete lenta"
+        SpeechRecognizer.ERROR_NO_MATCH -> "nessun risultato"
+        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "occupato"
+        SpeechRecognizer.ERROR_SERVER -> "server"
+        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "silenzio"
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "italiano non supportato"
+        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "italiano offline non scaricato"
+        else -> "errore $e"
+    }
+
+    private fun finishListen(text: String?, engine: String, error: String?) {
         val r = listenResult ?: return
         listenResult = null
-        main.post { r.success(text) }
+        main.post { r.success(mapOf("text" to text, "engine" to engine, "error" to error)) }
     }
 
     // ---------- Telefono ----------

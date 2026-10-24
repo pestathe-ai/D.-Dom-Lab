@@ -92,7 +92,7 @@ class ScreenState {
 /// Descrive lo schermo al modello in forma compatta:
 /// `[12] Invia (pulsante)` ecc. Restano fuori gli elementi senza testo né
 /// funzione. Si ferma a [maxChars] per non riempire il contesto.
-String formatScreen(ScreenState s, {int maxChars = 2200}) {
+String formatScreen(ScreenState s, {int maxChars = 1600}) {
   if (s.nodes.isEmpty) return 'Schermo vuoto o non leggibile.';
   final b = StringBuffer('App in primo piano: ${s.package}\n');
   var cut = false;
