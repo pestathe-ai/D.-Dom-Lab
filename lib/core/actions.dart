@@ -83,7 +83,8 @@ const Map<String, String> _aliases = {
 AgentAction? parseAction(String raw) {
   final obj = _firstJsonObject(raw);
   if (obj == null) return null;
-  var name = (obj['action'] ?? obj['tool'] ?? obj['name'] ?? obj['azione'] ?? '').toString().trim().toLowerCase();
+  final key = ['action', 'tool', 'azione', 'name'].firstWhere(obj.containsKey, orElse: () => '');
+  var name = (obj[key] ?? '').toString().trim().toLowerCase();
   name = name.replaceAll(' ', '_').replaceAll('-', '_');
   name = _aliases[name] ?? name;
   if (!knownActions.contains(name)) return null;
@@ -93,7 +94,7 @@ AgentAction? parseAction(String raw) {
     nested.forEach((k, v) => args[k.toString()] = v);
   }
   obj.forEach((k, v) {
-    if (k == 'action' || k == 'tool' || k == 'name' || k == 'azione' || k == 'args' || k == 'params' || k == 'parameters') {
+    if (k == key || k == 'args' || k == 'params' || k == 'parameters') {
       return;
     }
     args[k] = v;
@@ -101,7 +102,7 @@ AgentAction? parseAction(String raw) {
   // "name" usato per l'app: {"action":"open_app","name":"WhatsApp"} non
   // passa dal ciclo sopra, quindi lo recuperiamo.
   if (name == 'open_app' && !args.containsKey('app')) {
-    final alt = args['package'] ?? args['target'] ?? args['text'];
+    final alt = args['name'] ?? args['package'] ?? args['target'] ?? args['text'];
     if (alt != null) args['app'] = alt;
   }
   return AgentAction(name, args);
