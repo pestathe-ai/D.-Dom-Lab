@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="a11y_service_name">Dom, assistente vocale</string>
+    <string name="a11y_description">Permette a Dom di leggere lo schermo e di toccare, scrivere e scorrere al posto tuo quando glielo chiedi a voce. Tutto resta sul telefono: niente viene inviato a internet. Le app di banche e pagamenti vengono ignorate.</string>
+</resources>

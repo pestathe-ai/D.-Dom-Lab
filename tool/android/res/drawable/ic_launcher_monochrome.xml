@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Icona a tema (Android 13+): solo microfono e onde. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M48.5 40 A5.5 5.5 0 0 1 59.5 40 L59.5 55 A5.5 5.5 0 0 1 48.5 55 Z"/>
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFF"
+        android:strokeWidth="3" android:strokeLineCap="round"
+        android:pathData="M42 52 Q42 65 54 65 Q66 65 66 52 M54 65 L54 72 M47.5 72 L60.5 72 M72 43 Q76 49.5 72 56 M36 43 Q32 49.5 36 56"/>
+</vector>

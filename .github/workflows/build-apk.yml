@@ -1,0 +1,90 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepara Android
+        run: |
+          set -o pipefail
+          if ! ./tool/setup_platforms.sh 2>&1 | tee x.log; then
+            { grep -n -i -E 'error|failed|exception|because|requires|version solving|no such' x.log | tail -30; tail -15 x.log; } \
+              | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error title=setup::$(cat err.txt)"
+            exit 1
+          fi
+
+      - name: Analisi del codice
+        run: |
+          set -o pipefail
+          if ! flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee x.log; then
+            grep -n -E 'error •|error -' x.log | head -60 \
+              | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error title=analyze::$(cat err.txt)"
+            exit 1
+          fi
+          grep -n -E 'warning •|warning -' x.log | head -30 \
+            | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > warn.txt || true
+          if [ -s warn.txt ]; then echo "::warning title=analyze-warnings::$(cat warn.txt)"; fi
+
+      - name: Test
+        run: |
+          set -o pipefail
+          if ! flutter test --reporter expanded 2>&1 | tee x.log; then
+            grep -n -i -E 'error|failed|exception|Expected|Actual|Which|\.dart [0-9]+:[0-9]+|\[E\]' x.log | tail -50 \
+              | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error title=test::$(cat err.txt)"
+            exit 1
+          fi
+
+      - name: Compila APK
+        run: |
+          set -o pipefail
+          if ! flutter build apk --release --split-per-abi --target-platform android-arm64 2>&1 | tee x.log; then
+            grep -n -i -E '^e: |\.kt:[0-9]+|error|what went wrong|failed|exception|\.dart:[0-9]+|unresolved' x.log | grep -v -i 'warning' | head -60 \
+              | sed 's/%/%25/g' | awk 'BEGIN{ORS="%0A"} {print}' > err.txt
+            echo "::error title=build::$(cat err.txt)"
+            exit 1
+          fi
+
+      - name: Firma APK
+        run: |
+          set -e
+          BT=$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)
+          for f in build/app/outputs/flutter-apk/*-release.apk; do
+            "${BT}apksigner" sign --ks tool/signing/app.jks --ks-key-alias app \
+              --ks-pass pass:51e4e3232135b86bba9b5037 --key-pass pass:51e4e3232135b86bba9b5037 "$f"
+            "${BT}apksigner" verify --print-certs "$f" | head -5
+          done
+          ls -la build/app/outputs/flutter-apk/
+
+      - name: Pubblica release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: D. Dom Lab build ${{ github.run_number }}
+          body: |
+            Scarica **app-arm64-v8a-release.apk** (va bene per quasi tutti i telefoni recenti).
+            Serve Android 11 o successivo. Dopo l'installazione apri D. Dom Lab e segui la configurazione.
+          files: |
+            build/app/outputs/flutter-apk/*-release.apk

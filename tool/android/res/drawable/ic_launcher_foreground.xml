@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- D. Dom Lab: la casa Dom Studio con un microfono e le onde della voce.
+     Griglia 108×108. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFF8F0"
+        android:pathData="M31 40 L54 24 L77 40 L77 82 Q77 85 74 85 L34 85 Q31 85 31 82 Z"/>
+    <path android:fillColor="#F28C38"
+        android:pathData="M54 24 L77 40 L60 40 Q54 40 54 34 Z"/>
+    <!-- Microfono -->
+    <path android:fillColor="#1D3A8A"
+        android:pathData="M48.5 52 A5.5 5.5 0 0 1 59.5 52 L59.5 63 A5.5 5.5 0 0 1 48.5 63 Z"/>
+    <path android:fillColor="#00000000" android:strokeColor="#1D3A8A"
+        android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M44 61 Q44 72 54 72 Q64 72 64 61 M54 72 L54 78 M48.5 78 L59.5 78"/>
+    <!-- Onde della voce -->
+    <path android:fillColor="#00000000" android:strokeColor="#F28C38"
+        android:strokeWidth="2.4" android:strokeLineCap="round"
+        android:pathData="M68 52 Q71 57.5 68 63 M39.9 52 Q37 57.5 39.9 63"/>
+</vector>
