@@ -1,7 +1,7 @@
 name: dom_lab
-description: Dom, assistente vocale che comanda il telefono. Tutto sul telefono, gratis, senza cloud.
+description: Dom, assistente vocale che comanda il telefono, con Gemini (piano gratuito).
 publish_to: 'none'
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: ^3.13.0
@@ -12,10 +12,8 @@ dependencies:
     sdk: flutter
   material_ui: ^1.7.0
   path_provider: ^2.1.6
-  # AI sul telefono (LiteRT-LM di Google, gira sulla GPU, niente cloud).
-  # Stesso motore e stesso modello (Gemma 4 E2B) di D. Paper Lab.
-  flutter_edge_ai: ^2.5.0
-  flutter_edge_ai_litertlm: ^1.16.0
+  # Gemini via internet (piano gratuito): il telefono resta leggero.
+  http: ^1.6.0
 
 dev_dependencies:
   flutter_test:

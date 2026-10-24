@@ -44,6 +44,9 @@ abstract class Brain {
 
   /// Fine del compito.
   Future<void> reset();
+
+  /// Spiegazione dell'ultimo errore (chiave, rete, limiti), se c'è.
+  String? get lastError;
 }
 
 /// Una riga del registro mostrato a schermo.
@@ -125,7 +128,7 @@ class Agent {
       final watch = Stopwatch()..start();
       final raw = await brain.complete(prompt, delta: delta);
       watch.stop();
-      if (raw == null) return _finish('Il modello non risponde. Riprova tra poco.');
+      if (raw == null) return _finish(brain.lastError ?? 'Il modello non risponde. Riprova tra poco.');
       final action = parseAction(raw);
       final secs = (watch.elapsedMilliseconds / 1000).toStringAsFixed(1);
       if (action == null) {

@@ -1,7 +1,7 @@
 import 'package:material_ui/material_ui.dart';
 
 import '../core/agent.dart';
-import '../services/gemma.dart';
+import '../core/gemini_api.dart';
 import '../services/native.dart';
 import '../state/app_state.dart';
 
@@ -268,43 +268,12 @@ class _SetupPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = AppScope.of(context);
     final st = s.status;
-    final ai = s.ai;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       children: [
         Text('Configurazione', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
         const SizedBox(height: 4),
-        _Step(
-          done: s.modelInstalled,
-          title: '1. Cervello sul telefono',
-          subtitle: s.modelInstalled
-              ? '${s.model.label}: pronto, funziona senza internet'
-              : ai.downloading
-                  ? 'Download ${ai.progress}%… (tieni l\'app aperta e il Wi-Fi acceso)'
-                  : 'Scarica ${s.model.label} (${s.model.description.split('·')[1].trim()}). Serve una volta sola.',
-          error: ai.error,
-          action: s.modelInstalled
-              ? PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert),
-                  onSelected: (v) {
-                    if (v == 'remove') {
-                      s.removeModel();
-                    } else {
-                      final m = aiModelById(v);
-                      if (m != null) s.installModel(m);
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    for (final m in aiModels)
-                      if (m.id != s.modelId) PopupMenuItem(value: m.id, child: Text('Passa a ${m.label}')),
-                    const PopupMenuItem(value: 'remove', child: Text('Cancella il modello')),
-                  ],
-                )
-              : ai.downloading
-                  ? TextButton(onPressed: ai.cancelDownload, child: const Text('Annulla'))
-                  : FilledButton(onPressed: () => s.installModel(s.model), child: const Text('Scarica')),
-          progress: ai.downloading ? (ai.progress ?? 0) / 100 : null,
-        ),
+        const _KeyStep(),
         _Step(
           done: st.permissions,
           title: '2. Permessi',
@@ -337,7 +306,7 @@ class _SetupPanel extends StatelessWidget {
         ),
         _Step(
           done: st.vosk == 'ready' || st.vosk == 'downloaded',
-          title: '5. Voce offline',
+          title: 'Facoltativo · Voce offline',
           subtitle: _voskText(st),
           action: st.vosk == 'missing' || st.vosk.startsWith('error')
               ? FilledButton.tonal(onPressed: NativeControls.downloadVosk, child: const Text('Scarica'))
@@ -439,4 +408,119 @@ class _Step extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Passo 1: la chiave gratuita di Gemini e la scelta del modello.
+class _KeyStep extends StatefulWidget {
+  const _KeyStep();
+
+  @override
+  State<_KeyStep> createState() => _KeyStepState();
+}
+
+class _KeyStepState extends State<_KeyStep> {
+  final _ctrl = TextEditingController();
+  bool _editing = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = AppScope.of(context);
+    final cs = Theme.of(context).colorScheme;
+    final editing = _editing || !s.hasKey;
+    String subtitle;
+    if (!s.hasKey) {
+      subtitle = 'Incolla la tua chiave gratuita di Google AI Studio (aistudio.google.com/apikey). Resta solo su questo telefono.';
+    } else if (s.checkingKey) {
+      subtitle = 'Provo la chiave…';
+    } else if (s.keyCheck == null) {
+      subtitle = 'Chiave salvata (…${_tail(s.apiKey)}).';
+    } else if (s.keyCheck!.isEmpty) {
+      subtitle = 'Chiave funzionante (…${_tail(s.apiKey)}).';
+    } else {
+      subtitle = s.keyCheck!;
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _Step(
+            done: s.hasKey && s.keyCheck != null && s.keyCheck!.isEmpty,
+            title: '1. Cervello: Gemini',
+            subtitle: subtitle,
+            action: editing
+                ? null
+                : PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert),
+                    onSelected: (v) {
+                      if (v == 'edit') setState(() => _editing = true);
+                      if (v == 'test') s.testKey();
+                      if (v == 'remove') s.setKey('');
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'edit', child: Text('Cambia chiave')),
+                      PopupMenuItem(value: 'test', child: Text('Prova chiave')),
+                      PopupMenuItem(value: 'remove', child: Text('Cancella chiave')),
+                    ],
+                  ),
+          ),
+          if (editing)
+            Padding(
+              padding: const EdgeInsets.only(left: 36, top: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _ctrl,
+                      obscureText: true,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: const InputDecoration(isDense: true, hintText: 'Chiave API (AIza…)', border: OutlineInputBorder()),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: () async {
+                      final k = _ctrl.text.trim();
+                      if (k.isEmpty) return;
+                      _ctrl.clear();
+                      setState(() => _editing = false);
+                      FocusScope.of(context).unfocus();
+                      await s.setKey(k);
+                    },
+                    child: const Text('Salva'),
+                  ),
+                ],
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(left: 36, top: 8),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                for (final m in geminiModels)
+                  ChoiceChip(
+                    label: Text(m.label),
+                    selected: s.modelId == m.id,
+                    onSelected: (_) => s.setModel(m.id),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(left: 36, top: 2),
+            child: Text(s.model.description, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _tail(String k) => k.length <= 4 ? k : k.substring(k.length - 4);
 }

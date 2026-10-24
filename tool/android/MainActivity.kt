@@ -70,7 +70,6 @@ class MainActivity : FlutterActivity() {
         pendingWake = wakeExtra(intent)
         current = this
         initTts()
-        if (VoskModel.downloaded(this)) VoskModel.prepareAsync(this)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

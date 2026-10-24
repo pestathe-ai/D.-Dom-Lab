@@ -94,10 +94,10 @@ grep -q 'android.intent.action.ASSIST' "$MANIFEST" || { cat "$MANIFEST"; exit 1;
 
 for G in android/app/build.gradle.kts android/app/build.gradle; do
   if [ -f "$G" ]; then
-    # LiteRT-LM (Gemma sulla GPU) e il riconoscimento vocale moderno: Android 11+.
+    # Riconoscimento vocale moderno e servizi in primo piano col microfono: Android 11+.
     sed -i -E 's/minSdk( =|) flutter\.minSdkVersion/minSdk\1 30/' "$G"
     grep -q 'minSdk = 30\|minSdk 30' "$G" || { echo "minSdk non impostato"; cat "$G"; exit 1; }
-    # Niente R8: rinomina classi usate via JNI (LiteRT, Vosk/JNA) e rompe la release.
+    # Niente R8: rinomina classi usate via JNI (Vosk/JNA) e rompe la release.
     sed -i -E 's/^( *)signingConfig = signingConfigs\.getByName\("debug"\)/\1signingConfig = signingConfigs.getByName("debug")\n\1isMinifyEnabled = false\n\1isShrinkResources = false/' "$G"
     grep -q 'isMinifyEnabled = false' "$G" || { echo "minify non disattivato"; cat "$G"; exit 1; }
     # Vosk: riconoscimento offline della frase "Ciao Dom".

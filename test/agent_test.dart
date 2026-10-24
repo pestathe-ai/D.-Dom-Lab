@@ -148,6 +148,9 @@ class FakeBrain implements Brain {
   int resets = 0;
 
   @override
+  String? lastError;
+
+  @override
   Future<void> reset() async => resets++;
 }
 
